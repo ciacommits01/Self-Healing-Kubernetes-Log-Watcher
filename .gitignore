@@ -1,0 +1,12 @@
+﻿venv/
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.idea/
+
+# Generated at runtime — regenerate via generate_seed_logs.py / train.py
+# Comment these out if you want reproducible demo data checked in
+data/*.log
+data/anomaly_windows.json
+detector/model.joblib
