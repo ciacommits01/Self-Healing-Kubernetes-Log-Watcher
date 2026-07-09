@@ -3,27 +3,44 @@ Turns a detected incident (pod, signal, score, raw log excerpt) into a
 human-readable incident summary — the kind an SRE would want in a Slack
 alert or postmortem doc.
 
-LLM backend: Ollama (https://ollama.com), which is free, open-weight, and
-runs entirely on your own machine/cluster (no API key, no per-token cost).
-    1. Install: https://ollama.com/download
-    2. Pull a small model:  ollama pull llama3.2:1b   (or phi3, mistral, etc.)
-    3. It serves an OpenAI-compatible-ish REST API at localhost:11434.
+LLM backend: Ollama, in either of two modes — pick whichever fits:
 
-If Ollama isn't running (e.g. in CI, or you haven't installed it yet), we
-fall back to a deterministic template summary built from the same fields —
-this keeps the whole pipeline runnable out of the box with zero setup, and
-means a flaky/absent LLM never blocks a page from going out.
+  1. OLLAMA CLOUD (no local install): create an API key at
+     https://ollama.com/settings/keys, then:
+         export OLLAMA_API_KEY=your_api_key
+     This calls https://ollama.com/api/generate with the key as a Bearer
+     token. No GPU, no local model download, nothing running on your
+     machine. Trade-off: your log excerpts leave your machine and go to
+     Ollama's cloud service, and it's rate-limited/"free to start" rather
+     than unconditionally free — check current limits on ollama.com before
+     relying on it for a production pipeline.
+
+  2. LOCAL OLLAMA (fully offline, no API key, no per-request cost):
+         ollama pull llama3.2:1b   (or gpt-oss:20b, phi3, mistral, etc.)
+         ollama serve
+     Used automatically whenever OLLAMA_API_KEY is NOT set.
+
+Priority: if OLLAMA_API_KEY is set, cloud is used. Otherwise it tries your
+local Ollama at localhost:11434. If NEITHER is reachable (not installed,
+no key, CI environment, etc.), we fall back to a deterministic template
+summary built from the same incident fields — so a flaky/absent LLM never
+silently blocks a page from going out.
 """
 
 import json
 import logging
+import os
 
 import requests
 
 logger = logging.getLogger("summarize")
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3.2:1b"  # swap for any model you've pulled locally
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
+OLLAMA_CLOUD_URL = "https://ollama.com/api/generate"
+OLLAMA_CLOUD_MODEL = "gpt-oss:120b"  # only reachable via the cloud endpoint
+
+OLLAMA_LOCAL_URL = "http://localhost:11434/api/generate"
+OLLAMA_LOCAL_MODEL = "llama3.2:1b"  # swap for any model you've pulled locally
 
 PROMPT_TEMPLATE = """You are an SRE assistant writing a concise incident summary for a Slack alert.
 
@@ -43,10 +60,21 @@ action was already taken, and one concrete next step for the human. Be
 direct and specific, no filler, no markdown headers."""
 
 
-def _call_ollama(prompt, timeout=15):
+def _call_ollama_cloud(prompt, timeout=30):
     resp = requests.post(
-        OLLAMA_URL,
-        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+        OLLAMA_CLOUD_URL,
+        headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"},
+        json={"model": OLLAMA_CLOUD_MODEL, "prompt": prompt, "stream": False},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()["response"].strip()
+
+
+def _call_ollama_local(prompt, timeout=15):
+    resp = requests.post(
+        OLLAMA_LOCAL_URL,
+        json={"model": OLLAMA_LOCAL_MODEL, "prompt": prompt, "stream": False},
         timeout=timeout,
     )
     resp.raise_for_status()
@@ -82,8 +110,10 @@ def _fallback_summary(incident, action_result):
 
 def summarize_incident(incident, action_result=None, use_llm=True):
     """
-    Returns (summary_text, backend) where backend is 'ollama' or 'fallback'
-    so callers/logs can tell which path was used.
+    Returns (summary_text, backend) where backend is 'ollama-cloud',
+    'ollama-local', or 'fallback' so callers/logs can tell which path
+    was actually used — useful since this silently degrades rather than
+    erroring out.
     """
     if use_llm:
         prompt = PROMPT_TEMPLATE.format(
@@ -96,11 +126,17 @@ def summarize_incident(incident, action_result=None, use_llm=True):
             action=json.dumps(action_result) if action_result else "none",
             excerpt="\n".join(incident["excerpt"][:15]),
         )
+
+        if OLLAMA_API_KEY:
+            try:
+                return _call_ollama_cloud(prompt), "ollama-cloud"
+            except Exception as e:
+                logger.warning("Ollama Cloud call failed (%s) — trying local Ollama next.", e)
+
         try:
-            text = _call_ollama(prompt)
-            return text, "ollama"
+            return _call_ollama_local(prompt), "ollama-local"
         except Exception as e:
-            logger.warning("Ollama unavailable (%s) — using template fallback.", e)
+            logger.warning("Local Ollama unavailable (%s) — using template fallback.", e)
 
     return _fallback_summary(incident, action_result), "fallback"
 

@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-worker
+  labels:
+    app: checkout-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-worker
+  template:
+    metadata:
+      labels:
+        app: checkout-worker
+    spec:
+      containers:
+      - name: checkout-worker
+        image: busybox
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            i=0
+            while true; do
+              i=$((i+1))
+              if [ $i -le 5 ]; then
+                echo "$(date -Iseconds) INFO  [checkout-worker] Handled POST /checkout 201 45ms"
+              else
+                echo "$(date -Iseconds) ERROR [checkout-worker] connection refused: dial tcp 10.0.4.12:5432: connect: connection refused"
+                echo "$(date -Iseconds) ERROR [checkout-worker] Handled POST /checkout 503 5002ms"
+              fi
+              sleep 1
+            done

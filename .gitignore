@@ -4,6 +4,20 @@ __pycache__/
 *.pyo
 .vscode/
 .idea/
+.venv/
+
+# Secrets
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Editors
+.vscode/
+.idea/
+
 
 # Generated at runtime — regenerate via generate_seed_logs.py / train.py
 # Comment these out if you want reproducible demo data checked in

@@ -167,3 +167,47 @@ llm/
   summarize.py             Ollama-based summary + deterministic fallback
 main.py                    orchestrates the full pipeline
 ```
+
+## Demo test apps (`crashy-app.yaml` vs `dependency-timeout-app.yaml`)
+
+Two intentionally different failure modes, deployed to kind, to show what
+this tool actually adds on top of Kubernetes' own self-healing.
+
+### `crashy-app.yaml` — a real CrashLoopBackOff
+
+A busybox container that logs ~20 normal `Handled GET /health` lines, then
+one `panic:` line, then exits. Kubernetes detects the container has died
+and restarts it on its own — that's standard kubelet behavior, nothing to
+do with this project. This app exists to test two specific things:
+
+- **`LiveK8sWatcher`'s reconnect logic** — a log stream closes every time
+  a container exits, so the watcher has to detect that and reconnect with
+  backoff, or it silently stops working the moment a real crash loop
+  happens (the exact scenario it's meant to catch).
+- **`PodStatusWatcher`** — most apps never print words like "OOMKilled" or
+  "back-off restarting" themselves; those are facts Kubernetes knows about
+  the container's lifecycle, not things the app logs. This component
+  polls `restart_count` and `last_state.terminated.reason` directly from
+  the K8s API and injects that ground truth into the same detection
+  pipeline, since relying on log text alone under-detects real crash loops.
+
+**Honest limitation:** since kubelet already restarts the container on its
+own, our `restart_pod` remediation action here is mostly *redundant* with
+what Kubernetes was already going to do. This app is useful for testing
+the plumbing, not for demonstrating unique value.
+
+### `dependency-timeout-app.yaml` — the actual "self-healing" demo
+
+A busybox container that logs 5 normal lines, then logs `connection
+refused` / `503` errors **forever, without ever exiting**. The container
+stays `Running`, `RESTARTS` stays at `0` — kubelet has zero reason to do
+anything, because nothing crashed. This is the scenario that shows this
+project's real value: the anomaly detector reads the *log content* (not
+container lifecycle events) and fires a `dependency_timeout` incident,
+triggering `scale_deployment` — a real action Kubernetes itself would
+never have taken, since from its point of view everything looks healthy.
+
+**Verified result:** `kubectl get deployment checkout-worker` went from
+`1/1` to `2/2` replicas, driven entirely by log-based detection, with the
+container's health status never changing. That's the clearest before/after
+proof of what this tool adds beyond stock Kubernetes.
