@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-api
+  labels:
+    app: payment-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-api
+  template:
+    metadata:
+      labels:
+        app: payment-api
+    spec:
+      containers:
+      - name: payment-api
+        image: busybox
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            i=0
+            while true; do
+              i=$((i+1))
+              echo "$(date -Iseconds) INFO  [payment-api] Handled GET /health 200 $((RANDOM % 100))ms"
+              sleep 1
+              if [ $((i % 20)) -eq 0 ]; then
+                echo "$(date -Iseconds) ERROR [payment-api] panic: runtime error: invalid memory address"
+                exit 1
+              fi
+            done
