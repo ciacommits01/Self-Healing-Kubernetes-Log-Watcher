@@ -101,6 +101,9 @@ class LiveK8sWatcher:
                     "restart) — reconnecting in %ss", pod_name, backoff,
                 )
             except Exception as e:
+                if "Not Found" in str(e) or getattr(e, "status", None) == 404:
+                    logger.info("Pod %s no longer exists — ending log stream.", pod_name)
+                    break
                 logger.error("Log stream error for pod %s: %s — retrying in %ss", pod_name, e, backoff)
 
             if stop_event.is_set():
@@ -110,21 +113,20 @@ class LiveK8sWatcher:
 
     def _normalize_line(self, raw_line, pod_name):
         """
-        Only wraps lines that DON'T already match the detector's expected
-        "<ts> <LEVEL> [<pod>] <msg>" shape. If your container already logs
-        in (or close to) that shape — as our kind demo app does — this is
-        a pure passthrough. If it logs plain unstructured text, we wrap it
-        with a reception-time timestamp, a default INFO level, and the pod
-        tag, so features.py can still parse it.
-
-        For real production logs (JSON, structured, etc.) replace this
-        method with a small adapter for your actual format.
+        Normalizes any line to the expected shape:
+        "<ts> <LEVEL> [<pod_name>] <msg>"
+        Ensures the actual Kubernetes pod_name is always attached for proper
+        rolling window tracking and accurate pod targeting during remediation.
         """
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
             return None
-        if _ALREADY_SHAPED_RE.match(line):
-            return line + "\n"
+        m = re.match(r"^(?P<ts>\S+)\s+(?P<level>\w+)\s+(?:\[[^\]]+\]\s+)?(?P<msg>.*)$", line)
+        if m:
+            ts = m.group("ts")
+            level = m.group("level")
+            msg = m.group("msg")
+            return f"{ts} {level:<5} [{pod_name}] {msg}\n"
         return f"{_now_rfc3339()} INFO  [{pod_name}] {line}\n"
 
     def run(self, on_line):
@@ -137,24 +139,41 @@ class LiveK8sWatcher:
             config.load_kube_config()
 
         core_v1 = client.CoreV1Api()
-        pods = core_v1.list_namespaced_pod(
-            self.namespace, label_selector=self.label_selector
-        )
         stop_event = threading.Event()
+        tracked_pods = set()
         threads = []
-        for pod in pods.items:
-            t = threading.Thread(
-                target=self._stream_pod_logs,
-                args=(core_v1, pod.metadata.name, on_line, stop_event),
-                daemon=True,
-            )
-            t.start()
-            threads.append(t)
 
-        logger.info("Streaming logs from %d pod(s) — reconnects automatically on restart. Ctrl+C to stop.", len(threads))
+        logger.info(
+            "Watching pods in namespace '%s' matching selector '%s' (dynamic discovery enabled). Ctrl+C to stop.",
+            self.namespace,
+            self.label_selector,
+        )
+
         try:
-            for t in threads:
-                t.join()
+            while not stop_event.is_set():
+                try:
+                    pods = core_v1.list_namespaced_pod(
+                        self.namespace, label_selector=self.label_selector
+                    )
+                    for pod in pods.items:
+                        name = pod.metadata.name
+                        is_running = pod.status.phase == "Running" and any(
+                            cs.state.running is not None for cs in (pod.status.container_statuses or [])
+                        )
+                        if name not in tracked_pods and is_running:
+                            logger.info("Discovered pod %s (Running) — streaming logs...", name)
+                            tracked_pods.add(name)
+                            t = threading.Thread(
+                                target=self._stream_pod_logs,
+                                args=(core_v1, name, on_line, stop_event),
+                                daemon=True,
+                            )
+                            t.start()
+                            threads.append(t)
+                except Exception as e:
+                    logger.warning("Error scanning for pods: %s", e)
+
+                time.sleep(2)
         except KeyboardInterrupt:
             logger.info("Stopping watcher...")
             stop_event.set()
