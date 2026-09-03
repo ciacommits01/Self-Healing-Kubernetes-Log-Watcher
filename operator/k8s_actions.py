@@ -21,6 +21,11 @@ logger = logging.getLogger("k8s_actions")
 DRY_RUN = True  # flip to False only after validating decisions in dry-run mode
 
 
+def set_dry_run(dry_run: bool):
+    global DRY_RUN
+    DRY_RUN = dry_run
+
+
 def _get_clients():
     from kubernetes import client, config
 
@@ -42,8 +47,12 @@ def restart_pod(pod_name, namespace="default"):
         return {"action": "restart_pod", "pod": pod_name, "status": "dry_run"}
 
     core_v1, _ = _get_clients()
-    core_v1.delete_namespaced_pod(name=pod_name, namespace=namespace, grace_period_seconds=30)
-    return {"action": "restart_pod", "pod": pod_name, "status": "executed"}
+    try:
+        core_v1.delete_namespaced_pod(name=pod_name, namespace=namespace, grace_period_seconds=30)
+        return {"action": "restart_pod", "pod": pod_name, "status": "executed"}
+    except Exception as e:
+        logger.error("Failed to delete pod %s: %s", pod_name, e)
+        return {"action": "restart_pod", "pod": pod_name, "status": f"failed: {e}"}
 
 
 def scale_deployment(deployment_name, namespace="default", delta=1, max_replicas=10):
@@ -61,21 +70,25 @@ def scale_deployment(deployment_name, namespace="default", delta=1, max_replicas
                  "delta": delta, "status": "dry_run"}
 
     _, apps_v1 = _get_clients()
-    dep = apps_v1.read_namespaced_deployment(deployment_name, namespace)
-    current = dep.spec.replicas or 1
-    new_replicas = min(current + delta, max_replicas)
-    apps_v1.patch_namespaced_deployment_scale(
-        name=deployment_name,
-        namespace=namespace,
-        body={"spec": {"replicas": new_replicas}},
-    )
-    return {
-        "action": "scale_deployment",
-        "deployment": deployment_name,
-        "from": current,
-        "to": new_replicas,
-        "status": "executed",
-    }
+    try:
+        dep = apps_v1.read_namespaced_deployment(deployment_name, namespace)
+        current = dep.spec.replicas or 1
+        new_replicas = min(current + delta, max_replicas)
+        apps_v1.patch_namespaced_deployment_scale(
+            name=deployment_name,
+            namespace=namespace,
+            body={"spec": {"replicas": new_replicas}},
+        )
+        return {
+            "action": "scale_deployment",
+            "deployment": deployment_name,
+            "from": current,
+            "to": new_replicas,
+            "status": "executed",
+        }
+    except Exception as e:
+        logger.error("Failed to scale deployment %s: %s", deployment_name, e)
+        return {"action": "scale_deployment", "deployment": deployment_name, "status": f"failed: {e}"}
 
 
 def cordon_node_if_repeated(pod_name, namespace="default"):
