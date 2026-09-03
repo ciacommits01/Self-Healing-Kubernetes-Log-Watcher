@@ -31,7 +31,7 @@ sys.path.append("llm")
 from detect import AnomalyDetector  # noqa: E402
 from features import parse_line  # noqa: E402
 from watcher import SimulatedWatcher, LiveK8sWatcher  # noqa: E402
-from k8s_actions import take_action  # noqa: E402
+from k8s_actions import take_action, set_dry_run  # noqa: E402
 from alerting import page  # noqa: E402
 from summarize import summarize_incident  # noqa: E402
 
@@ -97,6 +97,7 @@ class StreamingRunner:
 
 
 def main():
+    import os
     p = argparse.ArgumentParser()
     p.add_argument("--mode", choices=["simulate", "live"], default="simulate")
     p.add_argument("--log-file", default="data/live_stream.log", help="for --mode simulate")
@@ -104,13 +105,20 @@ def main():
     p.add_argument("--namespace", default="default")
     p.add_argument("--label-selector", default="app=payment-api", help="for --mode live")
     p.add_argument("--speed", type=float, default=0.0, help="seconds between lines in simulate mode")
+    p.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=True, help="Run actions in dry-run mode (default: True)")
     args = p.parse_args()
+
+    set_dry_run(args.dry_run)
+    logger.info("Operating with DRY_RUN=%s", args.dry_run)
 
     runner = StreamingRunner(args.model, namespace=args.namespace)
 
     if args.mode == "simulate":
-        logger.info("Running in SIMULATE mode against %s", args.log_file)
-        watcher = SimulatedWatcher(args.log_file, speed=args.speed)
+        log_file = args.log_file
+        if not os.path.exists(log_file) and os.path.exists("live_stream.log"):
+            log_file = "live_stream.log"
+        logger.info("Running in SIMULATE mode against %s", log_file)
+        watcher = SimulatedWatcher(log_file, speed=args.speed)
     else:
         logger.info("Running in LIVE mode: namespace=%s selector=%s", args.namespace, args.label_selector)
         watcher = LiveK8sWatcher(args.namespace, args.label_selector)
