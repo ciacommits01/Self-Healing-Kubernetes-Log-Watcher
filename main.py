@@ -27,6 +27,7 @@ import sys
 sys.path.append("detector")
 sys.path.append("operator")
 sys.path.append("llm")
+sys.path.append("storage")
 
 from detect import AnomalyDetector  # noqa: E402
 from features import parse_line  # noqa: E402
@@ -34,6 +35,7 @@ from watcher import SimulatedWatcher, LiveK8sWatcher  # noqa: E402
 from k8s_actions import take_action, set_dry_run  # noqa: E402
 from alerting import page  # noqa: E402
 from summarize import summarize_incident  # noqa: E402
+from incident_store import save_incident  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("main")
@@ -49,12 +51,18 @@ class StreamingRunner:
     """
 
     def __init__(self, model_path, namespace="default"):
+        import threading
         self.detector = AnomalyDetector(model_path)
         self.namespace = namespace
         self.all_lines = []
         self.seen_incident_ranges = []  # list of (pod, start_line, end_line) already actioned
+        self._lock = threading.Lock()
 
     def on_line(self, line):
+        with self._lock:
+            self._on_line_locked(line)
+
+    def _on_line_locked(self, line):
         self.all_lines.append(line)
         if len(self.all_lines) % self.detector.stride != 0:
             return
@@ -83,6 +91,7 @@ class StreamingRunner:
                 "WARNING-tier anomaly (no action/page): pod=%s signal=%s score=%.4f",
                 incident["pod"], incident["signal"], incident["worst_score"],
             )
+            save_incident(incident)
             return
 
         logger.warning(
@@ -93,6 +102,7 @@ class StreamingRunner:
         action_result = take_action(incident["signal"], incident["pod"], self.namespace)
         summary_text, backend = summarize_incident(incident, action_result)
         logger.info("Summary generated via backend=%s", backend)
+        save_incident(incident, action_result, summary_text, backend)
         page(incident, summary_text, action_result)
 
 

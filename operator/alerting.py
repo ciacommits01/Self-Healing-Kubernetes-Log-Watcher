@@ -28,11 +28,19 @@ def page(incident, summary_text, action_result=None):
         except Exception as e:
             logger.error("Slack webhook failed (%s), falling back to stdout.", e)
 
-    print("\n" + "=" * 70)
-    print("🚨 PAGE (no SLACK_WEBHOOK_URL configured — printing instead) 🚨")
-    print("=" * 70)
-    print(payload_text)
-    print("=" * 70 + "\n")
+    header = "[ALERT] PAGE (no SLACK_WEBHOOK_URL configured -- printing instead)"
+    try:
+        print("\n" + "=" * 70)
+        print("🚨 PAGE (no SLACK_WEBHOOK_URL configured — printing instead) 🚨")
+        print("=" * 70)
+        print(payload_text)
+        print("=" * 70 + "\n")
+    except UnicodeEncodeError:
+        print("\n" + "=" * 70)
+        print(header)
+        print("=" * 70)
+        print(payload_text.encode("ascii", errors="replace").decode("ascii"))
+        print("=" * 70 + "\n")
     return {"channel": "stdout", "status": "printed"}
 
 

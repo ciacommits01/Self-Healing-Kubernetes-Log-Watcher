@@ -6,16 +6,36 @@ language model), we hand-engineer features that any SRE would recognize as
 crash-loop / incident signals. This keeps the whole detector dependency-light,
 fast to train, fully offline, and easy to explain in a report:
 
-  - log_rate            lines seen per second in the window
-  - error_ratio          fraction of lines at ERROR level
-  - warn_ratio           fraction of lines at WARN level
-  - restart_signal       hits for "restart", "back-off", "terminated", "starting container"
-  - oom_signal           hits for "oomkilled", "memory usage"
-  - conn_signal          hits for "connection refused", "timeout", "deadline exceeded"
-  - panic_signal         hits for "panic", "exception", "traceback", "unhandled"
-  - distinct_error_types fraction of unique error message templates in window
-  - avg_latency          mean latency (ms) parsed out of request log lines
-  - latency_spike        max latency in window relative to a fixed baseline
+  - log_rate              lines seen per second in the window
+  - error_ratio            fraction of lines at ERROR level
+  - warn_ratio             fraction of lines at WARN level
+  - restart_signal         hits for "restart", "back-off", "terminated", "starting container"
+  - oom_signal             hits for "oomkilled", "memory usage"
+  - conn_signal            hits for "connection refused", "timeout", "deadline exceeded"
+  - panic_signal           hits for "panic", "exception", "traceback", "unhandled"
+  - distinct_error_types   fraction of unique error message templates in window
+  - avg_latency            mean latency (ms) parsed out of request log lines
+  - latency_spike          max latency in window relative to a fixed baseline
+  - novel_template_ratio   fraction of lines whose Drain3 template was never
+                           seen in the "known-good" training corpus (optional —
+                           only populated when a template_miner is supplied;
+                           see detector/template_miner.py)
+
+This is a complementary signal source to the keyword lists above: keywords
+only catch what someone thought to write a keyword for, while template
+mining catches "a message shape nobody's seen before," even for incident
+types with no keyword written for them. Defaults to 0.0 when no
+template_miner is passed in, so this module works standalone.
+
+Note: an earlier version of this also included `distinct_template_ratio`
+(distinct template clusters / window size). Empirically it barely
+separated normal from incident windows (0.55 vs 0.63 mean) — normal mixed
+traffic is already template-diverse — and its weak signal diluted
+IsolationForest's splits enough to visibly hurt precision (16 flagged
+incidents instead of 5, most of them false positives on GC-pause/slow-query
+noise). It was removed after that test; novel_template_ratio alone
+(0.003 vs 0.25 mean — a ~90x separation) captures the useful part of what
+Drain3 adds.
 
 Windows are built PER POD over a sliding count of N consecutive lines
 (default 20), which is more robust for bursty log traffic than fixed-time
@@ -46,6 +66,7 @@ FEATURE_NAMES = [
     "distinct_error_types",
     "avg_latency",
     "latency_spike",
+    "novel_template_ratio",
 ]
 
 
@@ -126,6 +147,12 @@ class PodWindow:
         avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
         latency_spike = max(latencies) if latencies else 0.0
 
+        # Template-mining feature (see detector/template_miner.py). Stays
+        # 0.0 if extract_windows() wasn't given a template_miner, so this
+        # module still works standalone / in tests without Drain3.
+        novel_count = sum(1 for e in entries if e.get("is_novel_template"))
+        novel_template_ratio = novel_count / n
+
         return [
             log_rate,
             error_ratio,
@@ -137,14 +164,21 @@ class PodWindow:
             distinct_error_types,
             avg_latency,
             latency_spike,
+            novel_template_ratio,
         ]
 
 
-def extract_windows(lines, window_size=20, stride=5):
+def extract_windows(lines, window_size=20, stride=5, template_miner=None):
     """
     Streams through log lines, grouping per-pod, and yields
     (pod, end_line_index, feature_vector) for every full window.
     Stride controls how often we emit a window (5 = emit every 5 new lines).
+
+    If template_miner is provided (a detector.template_miner.TemplateMinerWrapper),
+    each parsed line's message is also run through Drain3 to attach
+    cluster_id / is_novel_template info used by the two template-based
+    features in PodWindow.to_features(). Omit it to run with keyword-based
+    features only (e.g. for quick tests without the Drain3 dependency).
     """
     pod_windows = defaultdict(lambda: PodWindow(size=window_size))
     pod_counters = defaultdict(int)
@@ -154,6 +188,12 @@ def extract_windows(lines, window_size=20, stride=5):
         parsed = parse_line(raw)
         if not parsed:
             continue
+
+        if template_miner is not None:
+            cluster_id, is_novel = template_miner.process(parsed["msg"])
+            parsed["cluster_id"] = cluster_id
+            parsed["is_novel_template"] = is_novel
+
         pod = parsed["pod"]
         pod_windows[pod].add(parsed)
         pod_counters[pod] += 1

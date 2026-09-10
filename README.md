@@ -217,22 +217,52 @@ When a critical incident is detected, the pipeline automatically writes a concis
 
 ---
 
+## Web Dashboard & Interactive Chat UI
+
+The project includes an embedded Flask web interface for monitoring incidents, inspecting mined log patterns, and conversing with an AI SRE assistant.
+
+### Launching the Dashboard
+
+```bash
+python dashboard/app.py
+```
+Open your browser to `http://localhost:5000`.
+
+### Available Views
+
+* **`/` (Monitoring Dashboard)**: Displays summary cards (Total Incidents, Critical, Warning, Distinct Signals) and a live table of detected incidents stored in SQLite (`storage/incidents.db`).
+* **`/patterns` (Error Patterns)**: Shows log templates mined from training logs using Drain3 (`detector/template_miner.py`) with automatic error-like pattern highlighting.
+* **`/chat` (Cluster Health Chat)**: An interactive chat UI powered by `chatbot/chat_engine.py` allowing operators to query recent incidents, pod status, and anomaly frequency.
+
+---
+
 ## Project Layout
 
 ```
+├── chatbot/
+│   ├── chat_engine.py             # SRE cluster assistant LLM engine
+│   └── chat_cli.py                # Standalone CLI interface for cluster chat
+├── dashboard/
+│   └── app.py                     # Flask monitoring dashboard and chat web UI
 ├── data/
 │   └── generate_seed_logs.py      # Synthetic normal and incident log generator
 ├── detector/
 │   ├── features.py                # Rolling per-pod window feature extraction
 │   ├── train.py                   # IsolationForest training script
 │   ├── detect.py                  # Anomaly scorer and incident clustering
+│   ├── template_miner.py          # Drain3 template miner wrapper
+│   ├── drain3_state.bin           # Drain3 learned template cluster state
 │   └── model.joblib               # Trained model bundle (generated)
+├── llm/
+│   ├── ollama_client.py           # Shared Ollama client for local/cloud LLMs
+│   └── summarize.py               # Ollama local/cloud + template fallback summarizer
 ├── operator/
 │   ├── watcher.py                 # SimulatedWatcher and dynamic LiveK8sWatcher
 │   ├── k8s_actions.py             # Remediation actions (restart_pod, scale_deployment)
 │   └── alerting.py                # Slack webhook and formatted stdout alerter
-├── llm/
-│   └── summarize.py               # Ollama local/cloud + template fallback summarizer
+├── storage/
+│   ├── incident_store.py          # SQLite persistence layer for incidents
+│   └── incidents.db               # SQLite database file
 ├── crashy-app.yaml                # Demo test app 1: Panic and crash-loop failure
 ├── dependency-timeout-app.yaml    # Demo test app 2: Silent 503 / connection failure
 ├── main.py                        # Pipeline orchestrator
