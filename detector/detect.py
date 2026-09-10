@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.append(".")
 from features import extract_windows
+from template_miner import TemplateMinerWrapper
 
 
 class AnomalyDetector:
@@ -24,8 +25,22 @@ class AnomalyDetector:
         self.threshold = bundle["threshold"]
         self.critical_threshold = bundle.get("critical_threshold", bundle["threshold"] - 0.05)
 
+        # Backward-compatible: models trained before Drain3 was added won't
+        # have these keys. In that case template_miner stays None and
+        # extract_windows() just skips the two template-based features
+        # (they'll read as 0.0, matching how the model was trained).
+        drain_state_path = bundle.get("drain_state_path")
+        known_max_cluster_id = bundle.get("known_max_cluster_id", 0)
+        if drain_state_path:
+            self.template_miner = TemplateMinerWrapper(drain_state_path, known_max_cluster_id)
+        else:
+            self.template_miner = None
+
     def score_lines(self, lines):
-        windows = extract_windows(lines, window_size=self.window_size, stride=self.stride)
+        windows = extract_windows(
+            lines, window_size=self.window_size, stride=self.stride,
+            template_miner=self.template_miner,
+        )
         if not windows:
             return []
 
@@ -140,9 +155,10 @@ _FEATURE_INDEX = {
     "log_rate": 0, "error_ratio": 1, "warn_ratio": 2, "restart_signal": 3,
     "oom_signal": 4, "conn_signal": 5, "panic_signal": 6,
     "distinct_error_types": 7, "avg_latency": 8, "latency_spike": 9,
+    "novel_template_ratio": 10,
 }
 
-_SIGNAL_LABELS = {
+_KEYWORD_SIGNAL_LABELS = {
     "restart_signal": "crash_loop",
     "oom_signal": "oom_kill",
     "conn_signal": "dependency_timeout",
@@ -152,17 +168,28 @@ _SIGNAL_LABELS = {
 
 
 def _dominant_signal(buf):
-    """Averages the raw feature vectors across a flagged window group and
-    picks whichever incident-signature feature is strongest, so the
-    downstream summary can say *what kind* of incident this looks like."""
+    """
+    Picks the incident label the downstream summary should use. Keyword
+    features are checked FIRST and preferred whenever any of them is
+    actually present (>0) — they're more specific and interpretable
+    ("crash_loop" beats "novel_pattern" when we genuinely see panic/restart
+    text). novel_template_ratio (Drain3) only becomes the label when NO
+    keyword fired at all — that's the case it exists for: catching an
+    incident type nobody wrote a keyword for, which keyword-only matching
+    would have missed entirely.
+    """
     feats = np.array([b["features"] for b in buf])
     avg = feats.mean(axis=0)
 
-    candidates = {name: avg[_FEATURE_INDEX[name]] for name in _SIGNAL_LABELS}
-    best_feature = max(candidates, key=candidates.get)
-    if candidates[best_feature] <= 0:
-        return "error_pattern"
-    return _SIGNAL_LABELS[best_feature]
+    keyword_candidates = {name: avg[_FEATURE_INDEX[name]] for name in _KEYWORD_SIGNAL_LABELS}
+    best_keyword = max(keyword_candidates, key=keyword_candidates.get)
+    if keyword_candidates[best_keyword] > 0:
+        return _KEYWORD_SIGNAL_LABELS[best_keyword]
+
+    if "novel_template_ratio" in _FEATURE_INDEX and avg[_FEATURE_INDEX["novel_template_ratio"]] > 0:
+        return "novel_pattern"
+
+    return "error_pattern"
 
 
 if __name__ == "__main__":

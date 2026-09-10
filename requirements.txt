@@ -3,3 +3,6 @@ scikit-learn
 joblib
 requests
 kubernetes>=28.0.0
+flask
+drain3
+markdown
