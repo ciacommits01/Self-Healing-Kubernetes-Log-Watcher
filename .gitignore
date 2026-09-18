@@ -26,3 +26,10 @@ data/*.log
 anomaly_windows.json
 data/anomaly_windows.json
 detector/model.joblib
+# SQLite incident database — auto-created at runtime; not for version control
+storage/incidents.db
+*.db
+
+# pytest cache
+.pytest_cache/
+__pycache__/

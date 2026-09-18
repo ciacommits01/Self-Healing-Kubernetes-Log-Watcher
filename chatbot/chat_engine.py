@@ -11,11 +11,17 @@ NOT do multi-step tool use, and it explicitly does NOT attempt genuine
 forecasting/prediction — the prompt tells the model to say so honestly
 rather than speculate, since real incident prediction (as opposed to
 "what does the history show") is a distinct, much bigger project.
+
+TTL caching: Pod status and stats are cached for 30 seconds so that
+rapid user messages in the dashboard do not hammer the K8s API or SQLite
+on every keystroke.
 """
 
 import logging
 import os
 import sys
+import threading
+import time
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "llm"))
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "storage"))
@@ -25,7 +31,8 @@ from incident_store import get_recent_incidents, get_stats  # noqa: E402
 
 logger = logging.getLogger("chat_engine")
 
-MAX_HISTORY_TURNS = 5  # bounded so the prompt doesn't grow unbounded over a long session
+MAX_HISTORY_TURNS = 5  # bounded so the prompt doesn't grow unbounded
+_CACHE_TTL = 30  # seconds — how long to reuse pod status + stats
 
 SYSTEM_PROMPT = """You are an SRE assistant embedded in a Kubernetes self-healing log watcher tool. \
 You answer questions about this specific cluster's health, recent incidents, and log patterns, \
@@ -48,6 +55,32 @@ RECENT INCIDENTS (most recent first, up to 10):
 """
 
 
+class _TTLCache:
+    """
+    Minimal thread-safe TTL cache for a single value.
+    Calls fetch_fn() at most once per ttl_seconds.
+    """
+
+    def __init__(self, fetch_fn, ttl_seconds=30):
+        self._fetch_fn = fetch_fn
+        self._ttl = ttl_seconds
+        self._value = None
+        self._expires_at = 0.0
+        self._lock = threading.Lock()
+
+    def get(self, *args, **kwargs):
+        now = time.monotonic()
+        with self._lock:
+            if now >= self._expires_at:
+                self._value = self._fetch_fn(*args, **kwargs)
+                self._expires_at = now + self._ttl
+            return self._value
+
+    def invalidate(self):
+        with self._lock:
+            self._expires_at = 0.0
+
+
 def get_pod_status_text(namespace="default", label_selector=None):
     """
     Live, READ-ONLY pod status from the K8s API — no actions taken here.
@@ -67,13 +100,21 @@ def get_pod_status_text(namespace="default", label_selector=None):
         core_v1 = client.CoreV1Api()
         pods = core_v1.list_namespaced_pod(namespace, label_selector=label_selector)
         if not pods.items:
-            return f"No pods found in namespace '{namespace}'" + (f" matching '{label_selector}'" if label_selector else "") + "."
+            return (
+                f"No pods found in namespace '{namespace}'"
+                + (f" matching '{label_selector}'" if label_selector else "")
+                + "."
+            )
 
         lines = []
         for pod in pods.items:
             phase = pod.status.phase
             restarts = sum(cs.restart_count for cs in (pod.status.container_statuses or []))
-            ready = all(cs.ready for cs in (pod.status.container_statuses or [])) if pod.status.container_statuses else False
+            ready = (
+                all(cs.ready for cs in (pod.status.container_statuses or []))
+                if pod.status.container_statuses
+                else False
+            )
             lines.append(f"- {pod.metadata.name}: phase={phase}, ready={ready}, restarts={restarts}")
         return "\n".join(lines)
     except Exception as e:
@@ -113,10 +154,23 @@ class ChatEngine:
         self.label_selector = label_selector
         self.history = []  # list of (role, text) tuples, bounded
 
+        # TTL caches — pod status and stats are expensive per-request;
+        # cache them for _CACHE_TTL seconds to avoid hammering the K8s API
+        # and SQLite on every chat message in the dashboard.
+        self._stats_cache = _TTLCache(get_stats, ttl_seconds=_CACHE_TTL)
+        self._pod_status_cache = _TTLCache(
+            lambda: get_pod_status_text(self.namespace, self.label_selector),
+            ttl_seconds=_CACHE_TTL,
+        )
+        self._incidents_cache = _TTLCache(
+            lambda: get_recent_incidents(limit=10),
+            ttl_seconds=_CACHE_TTL,
+        )
+
     def ask(self, question):
-        pod_status = get_pod_status_text(self.namespace, self.label_selector)
-        stats = get_stats()
-        incidents = get_recent_incidents(limit=10)
+        pod_status = self._pod_status_cache.get()
+        stats = self._stats_cache.get()
+        incidents = self._incidents_cache.get()
 
         system_context = SYSTEM_PROMPT.format(
             pod_status=pod_status,

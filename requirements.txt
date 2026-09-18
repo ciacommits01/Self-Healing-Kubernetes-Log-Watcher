@@ -1,8 +1,11 @@
-numpy
-scikit-learn
-joblib
-requests
+numpy>=1.26,<3
+scikit-learn>=1.4,<2
+joblib>=1.3,<2
+requests>=2.31,<3
 kubernetes>=28.0.0
-flask
-drain3
-markdown
+flask>=3.0,<4
+drain3>=0.9.11,<1
+markdown>=3.5,<4
+
+# Test dependencies
+pytest>=8.0,<9

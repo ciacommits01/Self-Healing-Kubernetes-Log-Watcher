@@ -106,17 +106,62 @@ def cordon_node_if_repeated(pod_name, namespace="default"):
 ACTION_MAP = {
     "crash_loop": lambda pod, ns: restart_pod(pod, ns),
     "oom_kill": lambda pod, ns: restart_pod(pod, ns),
-    "dependency_timeout": lambda pod, ns: scale_deployment(_deployment_of(pod), ns, delta=1),
-    "error_spike": lambda pod, ns: scale_deployment(_deployment_of(pod), ns, delta=1),
+    "dependency_timeout": lambda pod, ns: scale_deployment(_deployment_of(pod, ns), ns, delta=1),
+    "error_spike": lambda pod, ns: scale_deployment(_deployment_of(pod, ns), ns, delta=1),
     "error_pattern": lambda pod, ns: restart_pod(pod, ns),
 }
 
 
-def _deployment_of(pod_name):
-    """EKS pod names look like <deployment>-<replicaset-hash>-<pod-hash>;
-    strip the last two dash-segments to recover the deployment name."""
+def _deployment_of(pod_name, namespace="default"):
+    """
+    Return the Deployment name that owns this pod.
+
+    Strategy (in order):
+    1. Try the Kubernetes API: follow Pod -> ownerReferences -> ReplicaSet ->
+       ownerReferences -> Deployment. This is the only reliable approach and
+       handles StatefulSets, DaemonSets, and multi-hyphen deployment names.
+    2. Fall back to the heuristic: strip the last two dash-segments from the
+       pod name (works for standard ReplicaSet-managed pods like
+       payment-api-7d9f8b6c-x2kqp -> payment-api).
+
+    Logs a warning whenever the API lookup fails so silent mis-targeting is
+    visible in the operator's logs.
+    """
+    # --- Attempt 1: live API ownerReference walk ---
+    try:
+        core_v1, apps_v1 = _get_clients()
+        pod = core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+        for owner in (pod.metadata.owner_references or []):
+            if owner.kind == "ReplicaSet":
+                rs = apps_v1.read_namespaced_replica_set(
+                    name=owner.name, namespace=namespace
+                )
+                for rs_owner in (rs.metadata.owner_references or []):
+                    if rs_owner.kind == "Deployment":
+                        logger.debug(
+                            "_deployment_of %s -> %s (via ownerReferences)",
+                            pod_name, rs_owner.name,
+                        )
+                        return rs_owner.name
+            elif owner.kind == "StatefulSet":
+                logger.debug(
+                    "_deployment_of %s -> %s (StatefulSet owner)", pod_name, owner.name
+                )
+                return owner.name
+    except Exception as e:
+        logger.warning(
+            "_deployment_of: K8s API lookup failed for pod '%s' (%s) — "
+            "falling back to name heuristic. Check kubeconfig if this is unexpected.",
+            pod_name, e,
+        )
+
+    # --- Fallback: strip last two dash-segments (e.g. <deploy>-<rs>-<pod>) ---
+    # This is reliable for standard EKS Deployment-managed pods but will
+    # produce wrong names for StatefulSets (pod-0) or short pod names.
     parts = pod_name.split("-")
-    return "-".join(parts[:-2]) if len(parts) > 2 else pod_name
+    if len(parts) > 2:
+        return "-".join(parts[:-2])
+    return pod_name
 
 
 def take_action(signal, pod_name, namespace="default"):

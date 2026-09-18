@@ -18,9 +18,6 @@ import time
 
 logger = logging.getLogger("watcher")
 
-# Mirrors detector/features.py's LOG_RE, kept local (not imported) so this
-# module works standalone even if sys.path isn't wired up by main.py.
-_ALREADY_SHAPED_RE = re.compile(r"^\S+\s+\w+\s+\[[^\]]+\]\s+.*$")
 
 
 class SimulatedWatcher:
